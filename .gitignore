@@ -19,3 +19,4 @@ resultados/*.csv
 resultados/*.png
 aceleraciones*.txt
 *.Zone.Identifier
+c/common/sim_directa
