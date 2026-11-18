@@ -144,7 +144,13 @@ def error_relativo(referencia, prueba):
 
 
 def ejecutar(programa, ruta_particulas, n, args, salida_acc):
-    comando = shlex.split(programa)
+    # Se acepta tanto --programa python3 sim.py como
+    # --programa "python3 sim.py".
+    if len(programa) == 1 and " " in programa[0]:
+        comando = shlex.split(programa[0])
+    else:
+        comando = list(programa)
+
     comando += [
         ruta_particulas,
         str(n),
@@ -219,7 +225,7 @@ def main():
     parser.add_argument("--N", type=int, default=2000,
                         help="tamano si se generan particulas (defecto 2000)")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--programa",
+    parser.add_argument("--programa", nargs="+",
                         help="comando de la version a verificar")
     parser.add_argument("--pasos", type=int, default=5)
     parser.add_argument("--dt", type=float, default=0.001)
