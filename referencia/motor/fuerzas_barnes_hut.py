@@ -1,7 +1,7 @@
 
 import time
-from motor.octree import NodoOctree
-from motor.fuerzas import calcular_energia_total
+from referencia.motor.octree import NodoOctree
+from referencia.motor.fuerzas import calcular_energia_total
 
 def construir_arbol(particulas):
 

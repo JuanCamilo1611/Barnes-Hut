@@ -3,4 +3,19 @@ __pycache__/
 *.so
 .venv/
 venv/
+
+# binarios locales
 prueba_mpi
+c/mpi/prueba_hello
+c/openmp/sim_openmp
+c/common/*.o
+*.o
+*.out
+
+# datos grandes y salidas de corridas
+data/*.txt
+!data/ejemplo_100.txt
+resultados/*.csv
+resultados/*.png
+aceleraciones*.txt
+*.Zone.Identifier

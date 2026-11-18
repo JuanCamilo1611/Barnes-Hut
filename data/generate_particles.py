@@ -1,89 +1,152 @@
+#!/usr/bin/env python3
+"""
+Genera las distribuciones de particulas del proyecto.
 
-import random
+Formato de salida (igual para todas las distribuciones):
+    una linea por particula con siete columnas:
+    x y z vx vy vz masa
+    masa = 1/N en todos los casos, semilla fija para reproducibilidad.
+
+Uso:
+    python3 data/generate_particles.py --distribucion uniforme --N 1000
+    python3 data/generate_particles.py --distribucion cumulos --N 20000 --out data/cumulos.txt
+    python3 data/generate_particles.py --distribucion concentradas --N 200000
+"""
+
+import argparse
 import os
+import random
 
-# ==========================================
-# CONFIGURACION DE LA SIMULACION
-# ==========================================
-
-N = 100                  # Cantidad de particulas
-SEED = 42                # Semilla para reproducibilidad
-OUTPUT = "data/particles.txt"
-
-# ==========================================
-# GENERACION DE PARTICULAS
-# ==========================================
-
-def generate_particles(n, seed):
-
-    # Inicializar generador aleatorio
-    rng = random.Random(seed)
-
-    particles = []
-
-    # Masa igual para todas las particulas
-    mass = 1.0 / n
-
-    for i in range(n):
-
-        # Posiciones aleatorias dentro del cubo unitario
-        x = rng.uniform(0.0, 1.0)
-        y = rng.uniform(0.0, 1.0)
-        z = rng.uniform(0.0, 1.0)
-
-        # Velocidades iniciales iguales a cero
-        vx = 0.0
-        vy = 0.0
-        vz = 0.0
-
-        # Guardar los datos de la particula
-        particle = [x, y, z, vx, vy, vz, mass]
-
-        particles.append(particle)
-
-    return particles
+DISTRIBUCIONES = ("uniforme", "cumulos", "concentradas")
 
 
-# ==========================================
-# GUARDAR PARTICULAS EN UN ARCHIVO
-# ==========================================
-
-def save_particles(particles, filename):
-
-    # Crear directorio si no existe
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-    with open(filename, "w") as file:
-
-        for particle in particles:
-
-            line = " ".join(f"{value:.8f}" for value in particle)
-
-            file.write(line + "\n")
+def generar_uniforme(n, rng):
+    """Posiciones uniformes en el cubo unitario, velocidades en cero."""
+    particulas = []
+    for _ in range(n):
+        particulas.append([
+            rng.uniform(0.0, 1.0),
+            rng.uniform(0.0, 1.0),
+            rng.uniform(0.0, 1.0),
+            0.0, 0.0, 0.0,
+        ])
+    return particulas
 
 
-# ==========================================
-# PROGRAMA PRINCIPAL
-# ==========================================
+def generar_cumulos(n, rng):
+    """
+    Dos cumulos gaussianos que se mueven el uno hacia el otro.
+
+    Castiga un reparto ingenuo del trabajo: la mitad de las
+    particulas esta en un lado y la otra mitad en el otro, con
+    velocidades opuestas, de modo que colisionan en el centro.
+    """
+    sigma = 0.12
+    velocidad = 0.5
+    separacion = 0.45
+
+    mitad = n // 2
+    conteo = [mitad, n - mitad]
+    centros = [
+        (0.5 - separacion, 0.5, 0.5),
+        (0.5 + separacion, 0.5, 0.5),
+    ]
+    velocidades = [
+        (+velocidad, 0.0, 0.0),
+        (-velocidad, 0.0, 0.0),
+    ]
+
+    particulas = []
+
+    for cumulo in range(2):
+        cx, cy, cz = centros[cumulo]
+        vx, vy, vz = velocidades[cumulo]
+
+        for _ in range(conteo[cumulo]):
+            particulas.append([
+                rng.gauss(cx, sigma),
+                rng.gauss(cy, sigma),
+                rng.gauss(cz, sigma),
+                vx, vy, vz,
+            ])
+
+    return particulas
+
+
+def generar_concentradas(n, rng):
+    """
+    Casi todas las particulas dentro de un volumen muy pequeno.
+
+    Castiga la profundidad del arbol y los criterios de apertura:
+    muchas particulas muy cerca unas de otras.
+    """
+    sigma = 0.01
+    centro = 0.5
+
+    particulas = []
+
+    for _ in range(n):
+        particulas.append([
+            rng.gauss(centro, sigma),
+            rng.gauss(centro, sigma),
+            rng.gauss(centro, sigma),
+            0.0, 0.0, 0.0,
+        ])
+
+    return particulas
+
+
+GENERADORES = {
+    "uniforme": generar_uniforme,
+    "cumulos": generar_cumulos,
+    "concentradas": generar_concentradas,
+}
+
+
+def guardar(particulas, ruta):
+    """Escribe las particulas en el formato de siete columnas."""
+
+    directorio = os.path.dirname(ruta)
+    if directorio:
+        os.makedirs(directorio, exist_ok=True)
+
+    with open(ruta, "w") as archivo:
+        for particula in particulas:
+            masa = 1.0 / len(particulas)
+            valores = particula + [masa]
+            archivo.write(
+                " ".join("%.8f" % valor for valor in valores) + "\n"
+            )
+
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Genera distribuciones de particulas."
+    )
+    parser.add_argument(
+        "--distribucion",
+        choices=DISTRIBUCIONES,
+        default="uniforme",
+    )
+    parser.add_argument("--N", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--out", default="data/particles.txt")
 
-    print("================================")
-    print(" GENERADOR DE PARTICULAS")
-    print("================================")
+    args = parser.parse_args()
 
-    particles = generate_particles(N, SEED)
+    if args.N < 1:
+        parser.error("--N debe ser al menos 1")
 
-    save_particles(particles, OUTPUT)
+    rng = random.Random(args.seed)
+    particulas = GENERADORES[args.distribucion](args.N, rng)
 
-    print(f"Particulas generadas: {N}")
-    print(f"Semilla utilizada: {SEED}")
-    print(f"Masa por particula: {1.0/N}")
-    print(f"Archivo generado: {OUTPUT}")
+    guardar(particulas, args.out)
 
-    print("================================")
-    print("Generacion completada.")
-    print("================================")
+    print("Distribucion:", args.distribucion)
+    print("Particulas:", args.N)
+    print("Semilla:", args.seed)
+    print("Masa por particula:", 1.0 / args.N)
+    print("Archivo:", args.out)
 
 
 if __name__ == "__main__":
