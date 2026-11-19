@@ -22,3 +22,4 @@ aceleraciones*.txt
 c/common/sim_directa
 c/common/prueba_morton
 c/common/prueba_arbol
+c/common/sim_barnes_hut
