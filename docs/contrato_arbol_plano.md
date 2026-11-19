@@ -7,10 +7,11 @@ octree evita que cada versión invente un árbol distinto e incompatible.
 Formato **SoA** (struct-of-arrays): un arreglo por campo, indexado por
 nodo. **El nodo 0 es la raíz.**
 
-> Estado: **borrador para ratificar.** Camilo revisa las notas de MPI/LET;
-> Manuel ratifica la parte de C/CUDA (que la SoA y la invariante
-> "padre < hijo" sean construibles desde su orden Morton) antes de
-> escribir el octree.
+> Estado: **borrador para ratificar (rev. 2).** Incorpora dos ajustes
+> propuestos por Manuel en el PR y validados con medición: numeración en
+> **preorden** (para que las ramas queden contiguas, §3) y
+> `max_profundidad` = **20** con *bucketing* en el tope (§5). Pendiente la
+> aprobación formal de Manuel para empezar el octree.
 
 ## 1. Arreglos del árbol (estos SÍ se comparten / serializan)
 
@@ -46,9 +47,18 @@ produzca el mismo octante que la inserción recursiva de Python.
 ## 3. Invariantes (obligatorias — habilitan el recorrido sin recursión)
 
 1. **Nodo 0 = raíz.**
-2. **Todo hijo tiene índice mayor que su padre** (los hijos se crean
-   después). → La masa y el centro de masa se calculan en **una sola
-   pasada en orden inverso** (`n_nodos-1 → 0`), sin pila ni recursión.
+2. **Numeración en preorden (DFS):** cada nodo se numera antes que todos
+   sus descendientes, y el subárbol de un nodo ocupa un **rango contiguo**
+   `[nodo, último_descendiente]`. Esto garantiza a la vez dos cosas:
+   - **todo hijo tiene índice mayor que su padre** → masa y centro de masa
+     en **una sola pasada en orden inverso** (`n_nodos-1 → 0`), sin pila;
+   - **una rama es un bloque contiguo** → el LET de MPI se empaqueta como
+     un rango (§6).
+
+   *Nota: la numeración por niveles (BFS) cumpliría "hijo > padre" pero NO
+   daría subárboles contiguos; por eso se exige preorden. El orden Morton
+   de las hojas coincide con su orden DFS, así que una construcción basada
+   en Morton es compatible con preorden.*
 3. `part[n] ≥ 0`  ⟺  hoja ocupada; entonces `hijos[n, *]` son todos `-1`.
 4. Nodo interno  ⟺  `part[n] = -1`  y  algún `hijos[n, k] ≥ 0`.
 5. `masa[n]` y `com[n]` solo son válidos **después** de la pasada de
@@ -78,7 +88,18 @@ Auto-interacción: saltar la hoja cuya `part == objetivo`.
 - Tipos **float64 en CPU**. CUDA puede usar float32, documentando el error
   relativo vs la referencia.
 - Centinela `-1` en `int32` para `hijos` y `part`.
-- `max_profundidad` = **40**.
+- `max_profundidad` = **20**. *(Medido: las distribuciones uniforme,
+  cúmulos y concentradas alcanzan profundidad ≤ 14 con N hasta 100k, y
+  cap 20 y 40 producen árboles idénticos. Un cap bajo reduce además la
+  pila de recorrido en CUDA.)*
+- **Comportamiento en la profundidad máxima: *bucketing*, nunca error.**
+  Si al llegar a `max_profundidad` la hoja ya está ocupada, se **acumulan**
+  masa y momento en esa hoja (varias partículas por hoja) en vez de seguir
+  subdividiendo o abortar. En el recorrido, una hoja-bucket se trata como
+  una sola masa, y la auto-interacción solo excluye la partícula cuyo
+  índice está en `part[n]`. *(Ya implementado así en `python_mp/arbol.py`;
+  el núcleo C y CUDA deben replicarlo para no fallar con la distribución
+  concentrada de la demo.)*
 - La raíz cubre un cubo que contiene **todas** las partículas
   (bounding box + un pequeño margen).
 
@@ -107,8 +128,9 @@ del subárbol). Fijar esto ahora evita rediseñar el árbol para cumplir
 ### CUDA (Manuel)
 La SoA ya es **coalescente**. Recorrido con **pila explícita** (sin
 recursión); `hijos[n, 8]` con índices crecientes permite el walk
-iterativo. Ordenar las partículas por Morton antes de construir reduce la
-**divergencia de warp**.
+iterativo. La pila se dimensiona con `max_profundidad` (20): un cap bajo =
+menos presión de registros/shared por hilo. Ordenar las partículas por
+Morton antes de construir reduce la **divergencia de warp**.
 
 ## 7. Verificación
 
