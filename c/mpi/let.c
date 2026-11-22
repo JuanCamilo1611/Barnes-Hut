@@ -13,7 +13,10 @@ typedef struct {
     int32_t hijos[8], part, relleno;
 } NodoLET;
 
-typedef struct { double lo[3], hi[3]; int vacia, relleno; } Caja;
+typedef struct { double lo[3], hi[3]; } Caja;
+
+/* Cajas con que cada proceso describe su region (ver cajas_locales). */
+#define MAX_CAJAS 64
 
 /* ---------- criterio de apertura contra una CAJA (no un punto) ---------- */
 
@@ -43,13 +46,18 @@ static int toca_cubo(const ArbolPlano *a, int n, const Caja *b)
     return 1;
 }
 
-/* Se debe abrir la celda n para ALGUN punto de la caja? */
-static int abrir_para_caja(const ArbolPlano *a, int n, const Caja *b,
-                           double theta2)
+/* Se debe abrir la celda n para ALGUN punto de ALGUNA de las cajas del
+ * destino? (el destino describe su region con varias cajas ajustadas) */
+static int abrir_para_cajas(const ArbolPlano *a, int n, const Caja *b,
+                            int nb, double theta2)
 {
     double s = a->lado[n];
-    double d2 = dist2_caja(&a->com[3 * n], b);
-    return d2 == 0.0 || s * s >= theta2 * d2 || toca_cubo(a, n, b);
+    for (int k = 0; k < nb; k++) {
+        double d2 = dist2_caja(&a->com[3 * n], &b[k]);
+        if (d2 == 0.0 || s * s >= theta2 * d2 || toca_cubo(a, n, &b[k]))
+            return 1;
+    }
+    return 0;
 }
 
 /* ---------- armado del LET para una caja destino ---------- */
@@ -69,7 +77,7 @@ static void copiar_nodo(const ArbolPlano *a, int n, NodoLET *o)
  * fin[n] = ultimo descendiente de n (rango contiguo en preorden).
  * nuevo[] es memoria de trabajo de tamano n_nodos. */
 static int armar_let(const ArbolPlano *a, const int *fin, const Caja *b,
-                     double theta, NodoLET *out, int *nuevo)
+                     int nb, double theta, NodoLET *out, int *nuevo)
 {
     const double theta2 = theta * theta;
     int m = 0, i = 0;
@@ -83,7 +91,7 @@ static int armar_let(const ArbolPlano *a, const int *fin, const Caja *b,
             o->part = PART_REMOTA;
             for (int k = 0; k < 8; k++) o->hijos[k] = -1;
             i++;
-        } else if (!abrir_para_caja(a, i, b, theta2)) {
+        } else if (!abrir_para_cajas(a, i, b, nb, theta2)) {
             o->part = PART_REMOTA;                 /* resumen: hoja       */
             for (int k = 0; k < 8; k++) o->hijos[k] = -1;
             i = fin[i] + 1;                        /* salta la rama entera */
@@ -118,20 +126,84 @@ static void calcular_fin(const ArbolPlano *a, int *fin)
     }
 }
 
-static void caja_local(const Locales *L, Caja *b)
+/* Region de ESTE proceso como hasta MAX_CAJAS cajas ajustadas.
+ *
+ * Una sola caja envolvente no sirve: un tramo de la curva Morton puede
+ * tener partes en zonas lejanas del espacio, y su caja cubriria casi todo
+ * el dominio (los demas abririan todo su arbol y el LET seria el arbol
+ * completo). Por eso se baja por el arbol local nivel por nivel mientras
+ * la frontera tenga <= MAX_CAJAS nodos, y cada nodo de la frontera aporta
+ * la caja exacta de sus particulas. */
+static int cajas_locales(const ArbolPlano *a, const Locales *L, Caja *out)
 {
-    memset(b, 0, sizeof(*b));
-    b->vacia = (L->n == 0);
-    for (int k = 0; k < 3; k++) {
-        b->lo[k] = DBL_MAX;
-        b->hi[k] = -DBL_MAX;
-    }
-    for (int i = 0; i < L->n; i++)
+    int nn = a->n_nodos;
+    if (L->n == 0 || nn == 0)
+        return 0;
+
+    /* Caja de las particulas de cada nodo: una pasada inversa (hijo > padre). */
+    double *lo = malloc((size_t)nn * 3 * sizeof(double));
+    double *hi = malloc((size_t)nn * 3 * sizeof(double));
+    double lado_bucket = a->lado[0] * 1.5 / (double)(1 << MAX_PROFUNDIDAD);
+    for (int n = nn - 1; n >= 0; n--) {
         for (int k = 0; k < 3; k++) {
-            double p = L->pos[3 * i + k];
-            if (p < b->lo[k]) b->lo[k] = p;
-            if (p > b->hi[k]) b->hi[k] = p;
+            lo[3 * n + k] = DBL_MAX;
+            hi[3 * n + k] = -DBL_MAX;
         }
+        if (a->part[n] >= 0) {
+            for (int k = 0; k < 3; k++) {
+                if (a->lado[n] < lado_bucket) {   /* bucket: varias particulas */
+                    lo[3 * n + k] = a->centro[3 * n + k] - 0.5 * a->lado[n];
+                    hi[3 * n + k] = a->centro[3 * n + k] + 0.5 * a->lado[n];
+                } else {
+                    lo[3 * n + k] = hi[3 * n + k] = L->pos[3 * a->part[n] + k];
+                }
+            }
+            continue;
+        }
+        for (int c = 0; c < 8; c++) {
+            int h = a->hijos[8 * n + c];
+            if (h < 0) continue;
+            for (int k = 0; k < 3; k++) {
+                if (lo[3 * h + k] < lo[3 * n + k]) lo[3 * n + k] = lo[3 * h + k];
+                if (hi[3 * h + k] > hi[3 * n + k]) hi[3 * n + k] = hi[3 * h + k];
+            }
+        }
+    }
+
+    /* Frontera: se expande un nivel completo mientras quepa. */
+    int frontera[MAX_CAJAS], nf = 1, sig[MAX_CAJAS];
+    frontera[0] = 0;
+    for (;;) {
+        int ns = 0, cabe = 1;
+        for (int q = 0; q < nf && cabe; q++) {
+            int n = frontera[q];
+            if (a->part[n] >= 0) {
+                if (ns == MAX_CAJAS) cabe = 0; else sig[ns++] = n;
+                continue;
+            }
+            for (int c = 0; c < 8 && cabe; c++) {
+                int h = a->hijos[8 * n + c];
+                if (h < 0) continue;
+                if (ns == MAX_CAJAS) cabe = 0; else sig[ns++] = h;
+            }
+        }
+        if (!cabe || ns == nf)      /* no cabe otro nivel, o ya son hojas */
+            break;
+        memcpy(frontera, sig, (size_t)ns * sizeof(int));
+        nf = ns;
+    }
+
+    for (int q = 0; q < nf; q++) {
+        int n = frontera[q];
+        memset(&out[q], 0, sizeof(Caja));
+        for (int k = 0; k < 3; k++) {
+            out[q].lo[k] = lo[3 * n + k];
+            out[q].hi[k] = hi[3 * n + k];
+        }
+    }
+    free(lo);
+    free(hi);
+    return nf;
 }
 
 void liberar_let(LETRecibidos *rec)
@@ -151,11 +223,21 @@ void intercambiar_let(const ArbolPlano *local, const Locales *L,
     MPI_Comm_size(comm, &P);
     MPI_Comm_rank(comm, &yo);
 
-    /* 1. Todos conocen la caja de las particulas de todos. */
-    Caja mia, *cajas = malloc((size_t)P * sizeof(Caja));
-    caja_local(L, &mia);
-    MPI_Allgather(&mia, sizeof(Caja), MPI_BYTE, cajas, sizeof(Caja),
-                  MPI_BYTE, comm);
+    /* 1. Todos conocen las cajas de las particulas de todos. */
+    Caja mias[MAX_CAJAS];
+    int nb = cajas_locales(local, L, mias);
+    int *cuantas = malloc((size_t)P * sizeof(int));
+    int *cdesp = malloc((size_t)P * sizeof(int));
+    int bytes_cajas = nb * (int)sizeof(Caja);
+    MPI_Allgather(&bytes_cajas, 1, MPI_INT, cuantas, 1, MPI_INT, comm);
+    int ctotal = 0;
+    for (int r = 0; r < P; r++) {
+        cdesp[r] = ctotal;
+        ctotal += cuantas[r];
+    }
+    Caja *cajas = malloc((size_t)(ctotal ? ctotal : 1));
+    MPI_Allgatherv(mias, bytes_cajas, MPI_BYTE, cajas, cuantas, cdesp,
+                   MPI_BYTE, comm);
 
     /* 2. Un LET por destino, uno detras de otro en el mismo buffer. */
     int nn = local->n_nodos;
@@ -169,9 +251,11 @@ void intercambiar_let(const ArbolPlano *local, const Locales *L,
     int usados = 0;
     for (int r = 0; r < P; r++) {
         env_desp[r] = usados * (int)sizeof(NodoLET);
-        if (r == yo || cajas[r].vacia || nn == 0)
+        int nb_r = cuantas[r] / (int)sizeof(Caja);
+        if (r == yo || nb_r == 0 || nn == 0)
             continue;
-        int m = armar_let(local, fin, &cajas[r], theta, &envio[usados], nuevo);
+        const Caja *br = (const Caja *)((const char *)cajas + cdesp[r]);
+        int m = armar_let(local, fin, br, nb_r, theta, &envio[usados], nuevo);
         env_bytes[r] = m * (int)sizeof(NodoLET);
         usados += m;
     }
@@ -214,7 +298,7 @@ void intercambiar_let(const ArbolPlano *local, const Locales *L,
         }
     }
 
-    free(cajas); free(fin); free(nuevo); free(envio);
+    free(cajas); free(cuantas); free(cdesp); free(fin); free(nuevo); free(envio);
     free(env_bytes); free(env_desp); free(rec_bytes); free(rec_desp);
     free(recibo);
 }

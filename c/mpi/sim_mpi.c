@@ -43,6 +43,7 @@ typedef struct {
     /* tiempos acumulados de ESTE proceso */
     double t_reparto, t_sort, t_build, t_let, t_walk, t_integrar;
     long let_recibidos_max, nodos_locales_max;
+    double interacciones;   /* trabajo total del recorrido (suma de costos) */
 } Config;
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +84,7 @@ static void fuerzas(Locales *L, Config *c, MPI_Comm comm)
         for (int k = 0; k < 3; k++)
             L->acc[3 * i + k] = a[k];
         L->costo[i] = (double)costo;
+        c->interacciones += (double)costo;
     }
     double t5 = MPI_Wtime();
 
@@ -295,6 +297,7 @@ int main(int argc, char **argv)
     /* Aceleraciones iniciales: se escriben para verificar.py y son las
      * del primer medio paso del leapfrog. */
     fuerzas(&L, &c, comm);
+    MPI_Barrier(comm);      /* el total debe incluir al proceso mas lento */
     double t_pausa = MPI_Wtime();
     {
         Sistema g = { 0 };
@@ -339,6 +342,8 @@ int main(int argc, char **argv)
     MPI_Reduce(mio, suma, 7, MPI_DOUBLE, MPI_SUM, 0, comm);
     long nodos[2] = { c.let_recibidos_max, c.nodos_locales_max }, nodos_mx[2];
     MPI_Reduce(nodos, nodos_mx, 2, MPI_LONG, MPI_MAX, 0, comm);
+    double inter_total = 0.0;
+    MPI_Reduce(&c.interacciones, &inter_total, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
 
     double e_final = con_energia ? energia_global(&L, n, eps, comm) : 0.0;
 
@@ -355,6 +360,8 @@ int main(int argc, char **argv)
         printf("procesos=%d\n", P);
         printf("nodos_arbol_local_max=%ld\n", nodos_mx[1]);
         printf("nodos_let_recibidos_max=%ld\n", nodos_mx[0]);
+        printf("interacciones_por_particula=%.1f\n",
+               inter_total / ((double)n * (pasos + 1)));
         if (con_energia) {
             printf("energia_inicial=%.12f\n", e_inicial);
             printf("energia_final=%.12f\n", e_final);

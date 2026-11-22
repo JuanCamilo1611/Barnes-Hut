@@ -3,10 +3,11 @@
  * Locally Essential Tree: la parte del arbol de un proceso que OTRO
  * proceso necesita para calcular sus fuerzas.
  *
- * Para cada proceso destino se recorre el arbol local en PREORDEN contra
- * la caja (AABB) de las particulas del destino:
- *   - si la celda esta lejos de TODA la caja (lado < theta * distancia
- *     minima a la caja), se envia como un solo nodo y se SALTA su rama
+ * Cada proceso describe su region con hasta 64 cajas ajustadas (las de
+ * los nodos altos de su arbol local). Para cada destino se recorre el
+ * arbol local en PREORDEN contra las cajas del destino:
+ *   - si la celda esta lejos de TODAS sus cajas (lado < theta * distancia
+ *     minima a cada caja), se envia como un solo nodo y se SALTA su rama
  *     entera: i = fin[i] + 1 (posible porque en preorden la rama es un
  *     rango contiguo, contrato seccion 3);
  *   - si no, se envia el nodo y se sigue con sus hijos.
