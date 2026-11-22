@@ -74,7 +74,12 @@ static void fuerzas(Locales *L, Config *c, MPI_Comm comm)
     intercambiar_let(&c->arbol, L, c->theta, &c->let, comm);
     double t4 = MPI_Wtime();
 
-    for (int i = 0; i < L->n; i++) {
+    /* Se recorre en ORDEN MORTON: particulas consecutivas son vecinas en
+     * el espacio y visitan casi los mismos nodos, que siguen en cache.
+     * (Con la biseccion las particulas llegan ordenadas por x y recorrerlas
+     * asi era ~4 veces mas lento.) */
+    for (int q = 0; q < L->n; q++) {
+        int i = c->orden[q];
         double a[3] = { 0.0, 0.0, 0.0 };
         const double *p = &L->pos[3 * i];
         long costo = acumular_arbol(&c->arbol, p, i, c->theta, c->eps, a);
