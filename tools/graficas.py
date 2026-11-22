@@ -10,8 +10,8 @@ eficiencia) y genera dos figuras en resultados/plots/:
                               con la linea ideal y la marca de nucleos
                               fisicos.
   2. fases_python_mp.png      tiempo de build y total por proceso, que
-                              muestra por que 'local' pierde (rebuild
-                              redundante).
+                              muestra el costo del rebuild por proceso en
+                              la estrategia local.
 
 Uso:
   python3 tools/graficas.py --csv resultados/cierre_python_mp_XXXX.csv \
@@ -72,15 +72,17 @@ def fig_escalado(filas, nucleos, salida):
     # --- speedup ---
     ax1.plot(hilos, hilos, "--", color=GRIS, linewidth=1.5,
              label="ideal (lineal)", zorder=1)
+    # etiqueta directa en el ultimo punto; la de 'local' va debajo para
+    # que no se encime cuando las dos curvas terminan casi en el mismo valor
+    desfase = {"compartido": (6, 6), "local": (6, -12)}
     for estr in ("compartido", "local"):
         pts = serie(filas, estr)
         xs = [p["hilos"] for p in pts]
         ys = [p["speedup"] for p in pts]
         ax1.plot(xs, ys, "-o", color=COLOR[estr], linewidth=2,
                  markersize=7, label=estr, zorder=3)
-        # etiqueta directa en el ultimo punto
         ax1.annotate("%.2f x" % ys[-1], (xs[-1], ys[-1]),
-                     textcoords="offset points", xytext=(6, 4),
+                     textcoords="offset points", xytext=desfase[estr],
                      color=COLOR[estr], fontsize=9)
     ax1.axvline(nucleos, color=GRIS, linewidth=1, alpha=0.6)
     ax1.annotate("%d nucleos\nfisicos" % nucleos, (nucleos, 2.8),
@@ -134,7 +136,7 @@ def fig_fases(filas, salida):
             pos = [xi + (i - 0.5) * ancho for xi in x]
             ax.bar(pos, vals, ancho, color=COLOR[estr], label=estr)
             for p, v in zip(pos, vals):
-                ax.annotate("%.1f" % v, (p, v),
+                ax.annotate(("%.2f" if v < 1 else "%.1f") % v, (p, v),
                             textcoords="offset points", xytext=(0, 3),
                             ha="center", color=TINTA, fontsize=8)
         ax.set_title(titulo, color=TINTA, fontsize=12)

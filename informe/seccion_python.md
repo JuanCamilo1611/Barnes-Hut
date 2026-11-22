@@ -2,17 +2,22 @@
 
 ## Diseño
 
-El octree se representa con un **árbol plano** (*struct-of-arrays*): los
-nodos se guardan en arreglos NumPy paralelos (`centro`, `lado`, `masa`,
-`com`, `hijos[8]`, `part`) en lugar de objetos enlazados, de modo que la
-misma estructura se comparte entre procesos y es idéntica a la que usan las
-versiones en C y CUDA. El recorrido se vectoriza por lotes de partículas y
-no usa recursión: cada iteración evalúa toda la frontera (partícula, nodo)
-con operaciones de NumPy, por lo que el número de iteraciones es la
-profundidad del árbol. La integración es *leapfrog* KDK con una sola
-evaluación de fuerzas por paso.
+El octree es el **árbol plano** del contrato común
+(`docs/contrato_arbol_plano.md`): arreglos NumPy paralelos (`centro`,
+`lado`, `masa`, `com`, `hijos[8]`, `part`) numerados en **preorden**, con
+profundidad máxima 20 y *bucketing* en el tope. Se construye igual que en
+el núcleo C: códigos Morton de 63 bits, ordenamiento estable y creación de
+los nodos nivel por nivel como grupos de partículas con el mismo prefijo
+Morton; el preorden se obtiene ordenando los nodos por (código de inicio,
+profundidad), y masa y centro de masa salen de sumas por rangos contiguos
+(`np.add.reduceat`). No hay bucles de Python por partícula ni por nodo.
 
-La dificultad de la versión Python es **cómo compartir el árbol entre
+El recorrido se vectoriza por lotes de partículas y no usa recursión: cada
+iteración evalúa toda la frontera (partícula, nodo) con NumPy, de modo que
+el número de iteraciones es la profundidad del árbol. La integración es
+*leapfrog* KDK con una sola evaluación de fuerzas por paso.
+
+La dificultad de esta versión es **cómo compartir el árbol entre
 procesos**. Se implementaron y midieron dos estrategias sobre
 `multiprocessing.shared_memory`:
 
@@ -23,61 +28,96 @@ procesos**. Se implementaron y midieron dos estrategias sobre
 
 ## Correctitud
 
-Ambas estrategias se validan con la suma directa O(N²) mediante
-`tools/verificar.py`. Con N=1000 y θ=0.3, el **error relativo promedio de
-las fuerzas es 0.12 %** (máximo 0.92 %), por debajo del 1 % admisible para
-ese θ, y la **energía mecánica se conserva** (deriva 0.000 %). Las
-estrategias secuencial, compartido y local producen **resultados
-idénticos**, lo que confirma que la paralelización no altera el cálculo.
+Con N = 2000, θ = 0.3, 50 pasos y 4 procesos, `tools/verificar.py` frente a
+la suma directa O(N²):
+
+| distribución | error promedio | error máximo | deriva de energía |
+|---|---|---|---|
+| uniforme | 0.12 % | 1.91 % | 0.00003 % |
+| cúmulos | 0.10 % | 1.32 % | 0.0003 % |
+| concentradas | 0.36 % | 0.63 % | 0.42 % |
+
+Las tres pasan (error promedio y deriva < 1 %). Además, el árbol es
+**idéntico al del núcleo C**: mismo número de nodos (296 965 con 200 000
+partículas concentradas) y misma profundidad, y las aceleraciones coinciden
+con las de `sim_barnes_hut` con diferencia 0.000000 % (N = 20 000). Las
+estrategias secuencial, compartido y local producen resultados idénticos.
 
 ## Mediciones y decisión
 
-Se midió el escalado con 1, 2, 4 y 8 procesos (mediana de 3 repeticiones)
-sobre una distribución uniforme de N=20000 partículas, en un Intel
-i5-8250U de **4 núcleos físicos / 8 hilos lógicos**.
+Escalado con 1, 2, 4 y 8 procesos (mediana de 3 repeticiones, 3 pasos) con
+N = 20 000 uniforme, en un Intel i5-8250U de **4 núcleos físicos / 8 hilos
+lógicos** y 6 MiB de L3.
 
 | estrategia | procesos | build (s) | walk (s) | total (s) | speedup | eficiencia |
 |---|---|---|---|---|---|---|
-| secuencial | 1 | 2.47 | 23.79 | 26.25 | 1.00 | 1.00 |
-| compartido | 2 | 2.80 | 16.97 | 19.84 | 1.32 | 0.66 |
-| **compartido** | **4** | 2.85 | 15.53 | **18.44** | **1.42** | 0.36 |
-| compartido | 8 | 3.90 | 17.23 | 20.92 | 1.25 | 0.16 |
-| local | 2 | 3.29 | 16.48 | 19.85 | 1.32 | 0.66 |
-| local | 4 | 5.64 | 16.68 | 22.16 | 1.18 | 0.30 |
-| local | 8 | 11.19 | 15.55 | 27.97 | 0.94 | 0.12 |
+| secuencial | 1 | 0.07 | 23.74 | 23.86 | 1.00 | 1.00 |
+| compartido | 2 | 0.10 | 18.03 | 18.20 | 1.31 | 0.66 |
+| compartido | 4 | 0.12 | 15.84 | 16.01 | 1.49 | 0.37 |
+| compartido | 8 | 0.14 | 15.42 | 15.66 | 1.52 | 0.19 |
+| local | 2 | 0.09 | 15.96 | 16.12 | 1.48 | 0.74 |
+| local | 4 | 0.20 | 15.37 | 15.68 | 1.52 | 0.38 |
+| local | 8 | 0.41 | 15.00 | 15.45 | 1.54 | 0.19 |
 
 ![Speedup y eficiencia](../resultados/plots/escalado_python_mp.png)
 
 ![Tiempo de construcción y total](../resultados/plots/fases_python_mp.png)
 
-**Se elige la estrategia `compartido`.** Construye el árbol una sola vez y
-obtiene el mejor tiempo total (18.44 s con 4 procesos, *speedup* 1.42×).
-La estrategia `local` se descarta: reconstruir el árbol en cada trabajador
-es trabajo redundante O(P·N log N) cuyo coste de construcción se dispara
-(hasta 11.2 s con 8 procesos) y la vuelve **más lenta que la versión
-secuencial** (*speedup* 0.94×). Su único beneficio teórico —mejor localidad
-de caché en el recorrido— no se materializa, porque el cuello de botella es
-el ancho de banda de memoria, no la localidad (los tiempos de *walk* de
-ambas estrategias son casi iguales).
+**La decisión se midió dos veces.** Con la primera versión del árbol
+(inserción partícula por partícula, 2.47 s de *build*), `local` perdía:
+reconstruir en cada trabajador llevaba el *build* a 11.2 s con 8 procesos y
+el *speedup* a 0.94×. Al alinear el árbol con el contrato y construirlo por
+Morton, el *build* bajó 34 veces (2.47 → 0.07 s) y la diferencia en el
+tiempo total desapareció: hoy ambas estrategias están a menos de un 2 % con
+4 y 8 procesos, dentro de la variación entre corridas de este portátil.
+
+**Se mantiene `compartido`** por tres razones que no dependen del ruido:
+
+1. **Trabajo redundante que crece con P.** El *build* de `local` crece
+   linealmente con los procesos (0.09 → 0.20 → 0.41 s), porque son P copias
+   del mismo trabajo; el de `compartido` se hace una sola vez.
+2. **Memoria.** Cada árbol ocupa unos 100 B por nodo (≈ 30 MB con
+   N = 200 000); `local` guarda P copias (≈ 240 MB con 8 procesos) y
+   compite por la misma caché L3 que ya satura el recorrido (siguiente
+   sección).
+3. **Coherencia con MPI.** Construir una vez y recorrer en paralelo es el
+   esquema que se extiende a MPI, donde cada proceso recibe solo las ramas
+   que necesita (LET), que el preorden deja contiguas.
 
 ## Por qué el escalado se aplana
 
-El punto óptimo son **4 procesos**, coincidiendo con los núcleos físicos, y
-el *speedup* máximo es modesto (1.42×). Tres causas, en orden de impacto:
+El *speedup* se estanca en ≈1.5× desde 4 procesos. **No es la fracción
+secuencial:** *build* e integración son el 0.3 % del tiempo secuencial, y
+Amdahl permitiría 3.96× con 4 procesos y 7.8× con 8.
 
-1. **El recorrido está limitado por el ancho de banda de memoria.** El
-   *walk* solo escala 1.53× con 4 núcleos (23.79 → 15.53 s): es un acceso
-   aleatorio tipo *pointer-chasing* sobre un árbol de varios MB que desborda
-   la caché L3 de 6 MB; cuatro núcleos comparten un único controlador de
-   memoria y lo saturan. La fracción secuencial del *build* es solo ≈9 %,
-   de modo que la ley de Amdahl permitiría hasta ≈3.1× si el recorrido
-   escalara de forma ideal: el límite real es la memoria, no la parte
-   serial.
-2. **Solo hay 4 núcleos físicos.** Al pasar de 4 a 8 procesos no hay
-   ganancia (incluso se pierde), porque los 8 hilos son lógicos
-   (*hyperthreading*) y comparten los puertos de memoria del mismo núcleo,
-   que ya está saturado.
-3. **Fracción secuencial (Amdahl).** La construcción del árbol y la
-   integración no se paralelizan en `compartido`; en `local`, además, el
-   coste de reconstrucción redundante crece con el número de procesos y es
-   la causa de su derrota.
+La causa aparece al medir cada trabajador por separado (un cálculo de
+fuerzas, estrategia `compartido`):
+
+| procesos | partículas por proceso | tiempo por proceso | partículas/s en total |
+|---|---|---|---|
+| 1 | 20 000 | 6.06 s | 3 300 |
+| 2 | 10 000 | 4.1 s | 4 870 |
+| 4 | 5 000 | 4.1 s | 4 880 |
+| 8 | 2 500 | 4.0 s | 4 960 |
+
+El reparto está balanceado (todos los trabajadores tardan lo mismo) y el
+tiempo de CPU es igual al de pared, así que no hay esperas: **el
+rendimiento total se satura en ≈4 900 partículas/s desde 2 procesos**. Los
+procesos compiten por un recurso compartido:
+
+1. **Ancho de banda de memoria y L3.** Con N = 20 000 el árbol ocupa solo
+   ≈ 3 MB, pero el recorrido vectorizado con NumPy crea en cada nivel de la
+   frontera arreglos temporales de cientos de miles de pares (partícula,
+   nodo) que se escriben y se leen una vez: es tráfico de memoria, no
+   cómputo. Los 4 núcleos comparten la L3 de 6 MiB y el controlador de
+   memoria; con N = 200 000 el árbol (≈ 30 MB) tampoco cabe en la L3.
+   Reducir el lote para que los temporales quepan en caché y ordenar las
+   partículas por Morton mejora el tiempo con 4 procesos solo de forma
+   marginal (de 3.9 a 3.0 s), lo que confirma que el límite es el sistema
+   de memoria y no el cómputo.
+2. **Frecuencia del procesador.** El i5-8250U es un procesador de portátil:
+   con un solo núcleo activo llega a 3.4 GHz y baja con todos los núcleos
+   cargados, así que cada proceso es más lento cuando hay más procesos.
+3. **Hilos lógicos.** De 4 a 8 procesos no hay ganancia (1.49 → 1.52×): los
+   8 hilos son *hyperthreading* sobre los mismos 4 núcleos y comparten los
+   mismos puertos de memoria, ya saturados.
