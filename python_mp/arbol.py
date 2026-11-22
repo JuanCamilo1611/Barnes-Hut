@@ -1,33 +1,91 @@
 """
 Octree plano (arreglos) para Barnes-Hut.
 
-Sustituye al arbol de objetos de referencia/motor/octree.py por arreglos
-planos, que es lo que exige el enunciado para la version multiprocessing
-(memoria compartida) y la misma estructura que usaran las versiones C y
-CUDA.
+Sigue docs/contrato_arbol_plano.md, igual que el nucleo C:
 
-Cada nodo n guarda:
+    centro[n, 3]   centro geometrico del cubo
+    lado[n]        arista del cubo
+    masa[n]        masa total de la celda
+    com[n, 3]      centro de masa de la celda
+    hijos[n, 8]    hijo por octante, -1 si el octante esta vacio
+    part[n]        particula de la hoja (>= 0), -1 si el nodo es interno
 
-    centro[n, 3]        centro geometrico del cubo
-    lado[n]             arista del cubo
-    masa[n]             masa total de la celda
-    com[n, 3]           centro de masa de la celda
-    hojas_masa[n]       masa acumulada en una hoja
-    hojas_momento[n,3]  masa * posicion acumulada en una hoja
-    hijos[n, 8]         indice de los ocho hijos, -1 si no existen
-    part[n]             particula de la hoja, -1 si el nodo es interno
+Invariantes:
+  - nodo 0 = raiz;
+  - numeracion en PREORDEN: cada nodo va antes que sus descendientes y el
+    subarbol de un nodo es un rango contiguo de indices (habilita el LET
+    de MPI);
+  - solo se crean octantes ocupados (no hay nodos vacios);
+  - MAX_PROFUNDIDAD = 20 con bucketing: en el tope una hoja puede guardar
+    varias particulas; part[n] es la primera en orden Morton.
 
-Los hijos siempre se crean despues que el padre, por lo que la masa y el
-centro de masa se calculan recorriendo los nodos en orden inverso de
-creacion, sin recursion.
+Construccion (sin bucles de Python por particula ni por nodo):
+  1. codigos Morton de 63 bits (21 por eje, x el mas significativo) y
+     ordenamiento estable -> mismo orden que ordenar_por_morton() en C;
+  2. nivel por nivel, los nodos de profundidad d son los grupos de
+     particulas con el mismo prefijo de 3*d bits; un nodo es hoja si
+     tiene una particula o si d == MAX_PROFUNDIDAD;
+  3. ordenar los nodos por (codigo de inicio, profundidad) da el preorden;
+  4. como cada nodo es un rango contiguo de particulas en orden Morton,
+     masa y centro de masa salen de una suma por rangos (reduceat).
 """
 
 import numpy as np
 
+MAX_PROFUNDIDAD = 20      # contrato, seccion 5
+MORTON_BITS = 21          # bits por eje: 3 * 21 = 63 bits
+MARGEN = 1e-6             # fraccion de la arista agregada al cubo raiz
+
+
+# ------------------------------------------------------------
+# Morton (mismas operaciones que c/common/morton.c)
+# ------------------------------------------------------------
+
+def _separar_bits(v):
+    """...b2 b1 b0 -> ...b2 0 0 b1 0 0 b0, sobre uint64."""
+    x = v.astype(np.uint64) & np.uint64(0x1fffff)
+    x = (x | (x << np.uint64(32))) & np.uint64(0x1f00000000ffff)
+    x = (x | (x << np.uint64(16))) & np.uint64(0x1f0000ff0000ff)
+    x = (x | (x << np.uint64(8))) & np.uint64(0x100f00f00f00f00f)
+    x = (x | (x << np.uint64(4))) & np.uint64(0x10c30c30c30c30c3)
+    x = (x | (x << np.uint64(2))) & np.uint64(0x1249249249249249)
+    return x
+
+
+def _juntar_bits(x):
+    """Inversa de _separar_bits: extrae un eje de un codigo Morton."""
+    x = x & np.uint64(0x1249249249249249)
+    x = (x | (x >> np.uint64(2))) & np.uint64(0x10c30c30c30c30c3)
+    x = (x | (x >> np.uint64(4))) & np.uint64(0x100f00f00f00f00f)
+    x = (x | (x >> np.uint64(8))) & np.uint64(0x1f0000ff0000ff)
+    x = (x | (x >> np.uint64(16))) & np.uint64(0x1f00000000ffff)
+    x = (x | (x >> np.uint64(32))) & np.uint64(0x1fffff)
+    return x
+
+
+def caja_envolvente(posiciones):
+    """Cubo raiz: (minimo[3], lado), igual que caja_envolvente() en C."""
+    minimo = posiciones.min(axis=0)
+    maximo = posiciones.max(axis=0)
+    arista = float((maximo - minimo).max())
+    if arista == 0.0:
+        arista = 1.0          # todas las particulas en el mismo punto
+    margen = MARGEN * arista
+    return minimo - margen, arista + 2.0 * margen
+
+
+def codigos_morton(posiciones, minimo, lado):
+    escala = float(1 << MORTON_BITS)
+    t = (posiciones - minimo) / lado * escala
+    t = np.clip(t, 0.0, escala - 1.0).astype(np.uint64)
+    return ((_separar_bits(t[:, 0]) << np.uint64(2))
+            | (_separar_bits(t[:, 1]) << np.uint64(1))
+            | _separar_bits(t[:, 2]))
+
 
 class ArbolPlano:
 
-    def __init__(self, capacidad=1024, max_profundidad=40):
+    def __init__(self, capacidad=1024, max_profundidad=MAX_PROFUNDIDAD):
         self.max_profundidad = max_profundidad
         self.capacidad = 0
         self.n_nodos = 0
@@ -36,8 +94,6 @@ class ArbolPlano:
         self.lado = None
         self.masa = None
         self.com = None
-        self.hojas_masa = None
-        self.hojas_momento = None
         self.hijos = None
         self.part = None
         self._reservar(capacidad)
@@ -45,14 +101,14 @@ class ArbolPlano:
     @classmethod
     def con_arreglos(cls, centro, lado, masa, com, hijos, part,
                      n_nodos, capacidad, compartido=False,
-                     construible=False, max_profundidad=40):
+                     construible=False, max_profundidad=MAX_PROFUNDIDAD):
         """
         Arbol que apunta a arreglos ya existentes.
 
         Es lo que usan los trabajadores para recorrer el arbol que
         construyo el proceso principal en memoria compartida, sin
-        copiar nada.  `construible` reserva ademas los arreglos
-        auxiliares de la construccion, que no se comparten.
+        copiar nada.  `construible` se conserva por compatibilidad: la
+        construccion por Morton no necesita arreglos auxiliares.
         """
 
         arbol = cls.__new__(cls)
@@ -66,17 +122,6 @@ class ArbolPlano:
         arbol.com = com
         arbol.hijos = hijos
         arbol.part = part
-
-        if construible:
-            arbol.hojas_masa = np.zeros(capacidad, dtype=np.float64)
-            arbol.hojas_momento = np.zeros(
-                (capacidad, 3), dtype=np.float64
-            )
-        else:
-            # Solo se necesitan durante la construccion.
-            arbol.hojas_masa = None
-            arbol.hojas_momento = None
-
         return arbol
 
     # ------------------------------------------------------------
@@ -98,201 +143,131 @@ class ArbolPlano:
             )
 
         nueva = max(self.capacidad * 2, necesarios)
-
-        if self.capacidad == 0:
-            self.centro = np.zeros((nueva, 3), dtype=np.float64)
-            self.lado = np.zeros(nueva, dtype=np.float64)
-            self.masa = np.zeros(nueva, dtype=np.float64)
-            self.com = np.zeros((nueva, 3), dtype=np.float64)
-            self.hojas_masa = np.zeros(nueva, dtype=np.float64)
-            self.hojas_momento = np.zeros((nueva, 3), dtype=np.float64)
-            self.hijos = np.full((nueva, 8), -1, dtype=np.int32)
-            self.part = np.full(nueva, -1, dtype=np.int32)
-        else:
-            self.centro = np.resize(self.centro, (nueva, 3))
-            self.lado = np.resize(self.lado, nueva)
-            self.masa = np.resize(self.masa, nueva)
-            self.com = np.resize(self.com, (nueva, 3))
-            self.hojas_masa = np.resize(self.hojas_masa, nueva)
-            self.hojas_momento = np.resize(self.hojas_momento, (nueva, 3))
-            self.hijos = np.resize(self.hijos, (nueva, 8))
-            self.part = np.resize(self.part, nueva)
-
+        self.centro = np.zeros((nueva, 3), dtype=np.float64)
+        self.lado = np.zeros(nueva, dtype=np.float64)
+        self.masa = np.zeros(nueva, dtype=np.float64)
+        self.com = np.zeros((nueva, 3), dtype=np.float64)
+        self.hijos = np.full((nueva, 8), -1, dtype=np.int32)
+        self.part = np.full(nueva, -1, dtype=np.int32)
         self.capacidad = nueva
-
-    def _nuevo_nodo(self, centro, lado):
-        indice = self.n_nodos
-        self._reservar(indice + 1)
-        self.n_nodos = indice + 1
-
-        self.centro[indice] = centro
-        self.lado[indice] = lado
-        self.masa[indice] = 0.0
-        self.com[indice] = 0.0
-        self.hojas_masa[indice] = 0.0
-        self.hojas_momento[indice] = 0.0
-        self.hijos[indice] = -1
-        self.part[indice] = -1
-
-        return indice
 
     # ------------------------------------------------------------
     # construccion
     # ------------------------------------------------------------
-
-    @staticmethod
-    def _octante(centro, posicion):
-        indice = 0
-        if posicion[0] >= centro[0]:
-            indice += 4
-        if posicion[1] >= centro[1]:
-            indice += 2
-        if posicion[2] >= centro[2]:
-            indice += 1
-        return indice
-
-    def _subdividir(self, nodo):
-        centro = self.centro[nodo]
-        mitad = self.lado[nodo] / 4.0
-        nuevo_lado = self.lado[nodo] / 2.0
-
-        creados = np.empty(8, dtype=np.int32)
-        posicion = 0
-
-        for sx in (-1.0, 1.0):
-            for sy in (-1.0, 1.0):
-                for sz in (-1.0, 1.0):
-                    hijo_centro = (
-                        centro[0] + sx * mitad,
-                        centro[1] + sy * mitad,
-                        centro[2] + sz * mitad,
-                    )
-                    creados[posicion] = self._nuevo_nodo(
-                        hijo_centro, nuevo_lado
-                    )
-                    posicion += 1
-
-        self.hijos[nodo] = creados
-
-    def _insertar(self, indice, posiciones, masas):
-        nodo = 0
-        profundidad = 0
-
-        while True:
-            if self.hijos[nodo, 0] == -1:
-                # Nodo hoja.
-                anterior = self.part[nodo]
-
-                if anterior == -1:
-                    self.part[nodo] = indice
-                    self.hojas_masa[nodo] = masas[indice]
-                    self.hojas_momento[nodo] = (
-                        masas[indice] * posiciones[indice]
-                    )
-                    return
-
-                if profundidad >= self.max_profundidad:
-                    # Se alcanzo la profundidad maxima: se acumulan.
-                    self.hojas_masa[nodo] += masas[indice]
-                    self.hojas_momento[nodo] += (
-                        masas[indice] * posiciones[indice]
-                    )
-                    return
-
-                # Convertir la hoja en nodo interno.
-                self._subdividir(nodo)
-
-                hijo_anterior = self.hijos[
-                    nodo, self._octante(self.centro[nodo],
-                                        posiciones[anterior])
-                ]
-                self.part[hijo_anterior] = anterior
-                self.hojas_masa[hijo_anterior] = masas[anterior]
-                self.hojas_momento[hijo_anterior] = (
-                    masas[anterior] * posiciones[anterior]
-                )
-
-                self.part[nodo] = -1
-                self.hojas_masa[nodo] = 0.0
-                self.hojas_momento[nodo] = 0.0
-
-                nodo = self.hijos[
-                    nodo, self._octante(self.centro[nodo],
-                                        posiciones[indice])
-                ]
-                profundidad += 1
-                continue
-
-            nodo = self.hijos[
-                nodo, self._octante(self.centro[nodo],
-                                    posiciones[indice])
-            ]
-            profundidad += 1
-
-    def _calcular_masa_com(self):
-        """
-        Masa y centro de masa de cada nodo.
-
-        Los hijos se crean despues que el padre, así que recorrer los
-        nodos al reves garantiza que los hijos ya esten resueltos.
-        """
-        for nodo in range(self.n_nodos - 1, -1, -1):
-
-            if self.hijos[nodo, 0] == -1:
-                masa = self.hojas_masa[nodo]
-                self.masa[nodo] = masa
-
-                if masa > 0.0:
-                    self.com[nodo] = self.hojas_momento[nodo] / masa
-                else:
-                    self.com[nodo] = 0.0
-                continue
-
-            masa_total = 0.0
-            momento = np.zeros(3, dtype=np.float64)
-            hijos = self.hijos[nodo]
-
-            for k in range(8):
-                hijo = hijos[k]
-                if hijo == -1:
-                    continue
-
-                masa_hijo = self.masa[hijo]
-                if masa_hijo == 0.0:
-                    continue
-
-                masa_total += masa_hijo
-                momento += masa_hijo * self.com[hijo]
-
-            self.masa[nodo] = masa_total
-
-            if masa_total > 0.0:
-                self.com[nodo] = momento / masa_total
-            else:
-                self.com[nodo] = 0.0
 
     def construir(self, posiciones, masas):
         """Construye el arbol completo a partir de las posiciones."""
 
         posiciones = np.asarray(posiciones, dtype=np.float64)
         masas = np.asarray(masas, dtype=np.float64)
+        n = len(posiciones)
+        prof_max = min(self.max_profundidad, MORTON_BITS - 1)
 
-        minimo = posiciones.min(axis=0)
-        maximo = posiciones.max(axis=0)
+        # 1. Morton y orden (estable: empates por indice, como en C).
+        minimo, lado_raiz = caja_envolvente(posiciones)
+        codigos = codigos_morton(posiciones, minimo, lado_raiz)
+        orden = np.argsort(codigos, kind="stable")
+        codigos_ord = codigos[orden]
 
-        centro = (minimo + maximo) * 0.5
-        lado = float((maximo - minimo).max())
-        lado = max(lado, 1e-6) * 1.01
+        # 2. Nodos nivel por nivel.  `activas` son posiciones en el
+        #    arreglo ordenado de las particulas que aun no estan en una
+        #    hoja.  Por nivel se guarda: inicio, cantidad y prefijo.
+        niveles = []
+        activas = np.arange(n, dtype=np.int64)
+        for d in range(prof_max + 1):
+            desplaz = np.uint64(3 * (MORTON_BITS - d))
+            prefijo = codigos_ord[activas] >> desplaz
+            nuevo = np.empty(len(activas), dtype=bool)
+            nuevo[0] = True
+            nuevo[1:] = prefijo[1:] != prefijo[:-1]
+            arranques = np.flatnonzero(nuevo)
+            cantidades = np.diff(np.append(arranques, len(activas)))
 
-        self.n_nodos = 0
-        self._nuevo_nodo(centro, lado)
+            es_hoja = cantidades == 1
+            if d == prof_max:
+                es_hoja[:] = True            # bucketing en el tope
+            niveles.append((activas[arranques], cantidades,
+                            prefijo[arranques], es_hoja))
 
-        for indice in range(len(posiciones)):
-            self._insertar(indice, posiciones, masas)
+            activas = activas[~np.repeat(es_hoja, cantidades)]
+            if activas.size == 0:
+                break
 
-        self._calcular_masa_com()
+        inicio = np.concatenate([nv[0] for nv in niveles])
+        cantidad = np.concatenate([nv[1] for nv in niveles])
+        es_hoja = np.concatenate([nv[3] for nv in niveles])
+        prof = np.concatenate([np.full(len(nv[0]), d, dtype=np.int64)
+                               for d, nv in enumerate(niveles)])
+        n_nodos = len(inicio)
+
+        # 3. Preorden = orden por (codigo de inicio del cubo, profundidad):
+        #    un padre comparte codigo de inicio con su primer hijo pero
+        #    tiene menor profundidad; los descendientes de un nodo caen
+        #    antes que su siguiente hermano.
+        cod_inicio = np.concatenate([
+            nv[2] << np.uint64(3 * (MORTON_BITS - d))
+            for d, nv in enumerate(niveles)
+        ])
+        preorden = np.lexsort((prof, cod_inicio))   # viejo -> posicion
+        nuevo_id = np.empty(n_nodos, dtype=np.int64)
+        nuevo_id[preorden] = np.arange(n_nodos)
+
+        self._reservar(n_nodos)
+        self.n_nodos = n_nodos
+
+        # Geometria: el cubo de profundidad d con codigo de inicio c.
+        lado = lado_raiz / np.exp2(prof)
+        esquina = np.stack([_juntar_bits(cod_inicio >> np.uint64(s))
+                            for s in (2, 1, 0)], axis=1)
+        celda = lado_raiz / float(1 << MORTON_BITS)
+        centro = minimo + esquina.astype(np.float64) * celda \
+            + 0.5 * lado[:, None]
+
+        # 4. Masa y centro de masa por rangos de particulas.
+        masas_ord = masas[orden]
+        tabla = np.zeros((n + 1, 4), dtype=np.float64)
+        tabla[:n, 0] = masas_ord
+        tabla[:n, 1:] = masas_ord[:, None] * posiciones[orden]
+        cortes = np.empty(2 * n_nodos, dtype=np.int64)
+        cortes[0::2] = inicio
+        cortes[1::2] = inicio + cantidad
+        sumas = np.add.reduceat(tabla, cortes, axis=0)[0::2]
+        masa = sumas[:, 0]
+        con_masa = masa > 0.0
+        com = centro.copy()          # celda sin masa: com = centro
+        com[con_masa] = sumas[con_masa, 1:] / masa[con_masa, None]
+
+        # Escritura en los arreglos del contrato (posiblemente
+        # compartidos), ya en preorden.
+        k = nuevo_id
+        self.centro[k] = centro
+        self.lado[k] = lado
+        self.masa[k] = masa
+        self.com[k] = com
+        self.hijos[:n_nodos] = -1
+        self.part[:n_nodos] = -1
+        self.part[k[es_hoja]] = orden[inicio[es_hoja]]
+
+        # hijos[padre, octante]: el padre de un nodo de profundidad d es
+        # el nodo de profundidad d-1 cuyo prefijo es el suyo >> 3.
+        base = 0
+        for d in range(1, len(niveles)):
+            prefijos_padre = niveles[d - 1][2]
+            base_padre = base
+            base += len(prefijos_padre)
+            prefijo = niveles[d][2]
+            padre = base_padre + np.searchsorted(
+                prefijos_padre, prefijo >> np.uint64(3))
+            octante = (prefijo & np.uint64(7)).astype(np.int64)
+            hijo = base + np.arange(len(prefijo))
+            self.hijos[k[padre], octante] = k[hijo]
 
         return self
+
+    def profundidad(self):
+        """Profundidad maxima alcanzada (para el informe y las pruebas)."""
+        lados = self.lado[:self.n_nodos]
+        return int(np.round(np.log2(lados[0] / lados.min())))
 
     # ------------------------------------------------------------
     # recorrido
@@ -307,7 +282,7 @@ class ArbolPlano:
         Se procesan las particulas en lotes.  Cada iteracion evalua
         de golpe toda la frontera de pares (particula, nodo) con
         operaciones de numpy: se calcula el vector distancia, se
-        deciden los nodos que se abren y se expanden sus ocho hijos.
+        deciden los nodos que se abren y se expanden sus hijos.
         El numero de iteraciones es la profundidad del arbol.
 
         `desplazamiento` es el indice global de la primera particula
@@ -361,20 +336,14 @@ class ArbolPlano:
                 + distancia[:, 2] ** 2
             )
             masas = masa[pares_nodo]
-            es_hoja = hijos[pares_nodo, 0] == -1
+            hoja_part = part[pares_nodo]
+            es_hoja = hoja_part >= 0
 
             # --------------------------------------------------
             # hojas: aportan su masa salvo que sean la propia
             # particula
             # --------------------------------------------------
-            hojas = np.nonzero(es_hoja)[0]
-
-            if hojas.size:
-                mismas = (
-                    part[pares_nodo[hojas]]
-                    == pares_globales[hojas]
-                )
-                hojas = hojas[~mismas]
+            hojas = np.nonzero(es_hoja & (hoja_part != pares_globales))[0]
 
             if hojas.size:
                 self._aportar(
@@ -433,7 +402,8 @@ class ArbolPlano:
                     G, epsilon_cuadrado,
                 )
 
-            # Los que se abren expanden sus ocho hijos.
+            # Los que se abren expanden sus hijos existentes (los
+            # octantes vacios tienen -1 y se descartan).
             abiertos = internos[abre]
 
             if not abiertos.size:
@@ -443,10 +413,9 @@ class ArbolPlano:
             nuevas_particulas = np.repeat(pares_particula[abiertos], 8)
             nuevos_globales = np.repeat(pares_globales[abiertos], 8)
 
-            # Solo siguen los hijos con masa.
-            vivos = masa[hijos_abiertos] != 0.0
+            vivos = hijos_abiertos >= 0
 
-            pares_nodo = hijos_abiertos[vivos]
+            pares_nodo = hijos_abiertos[vivos].astype(np.int64)
             pares_particula = nuevas_particulas[vivos]
             pares_globales = nuevos_globales[vivos]
 
@@ -469,7 +438,7 @@ class ArbolPlano:
     def aceleraciones_python(self, posiciones, theta=0.3, G=1.0,
                              epsilon=0.01):
         """
-        Mismo recorrido escrito como bucle de Python.
+        Mismo recorrido escrito como bucle de Python con pila explicita.
 
         Existe solo para comprobar que la version vectorizada da lo
         mismo; no se usa en la simulacion.  Los arreglos se pasan a
@@ -517,9 +486,7 @@ class ArbolPlano:
                 dz = centro_masa[2] - pz
                 distancia_cuadrada = dx * dx + dy * dy + dz * dz
 
-                hijos = hijos_l[nodo]
-
-                if hijos[0] == -1:
+                if part_l[nodo] >= 0:
                     # Hoja: si es la propia particula no aporta nada.
                     if part_l[nodo] == indice:
                         continue
@@ -546,9 +513,8 @@ class ArbolPlano:
                     or distancia_cuadrada == 0.0
                     or lado * lado >= theta_cuadrado * distancia_cuadrada
                 ):
-                    for k in range(8):
-                        hijo = hijos[k]
-                        if hijo != -1 and masa_l[hijo] != 0.0:
+                    for hijo in hijos_l[nodo]:
+                        if hijo >= 0:
                             pila.append(hijo)
                     continue
 
