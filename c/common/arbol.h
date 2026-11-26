@@ -45,7 +45,20 @@ void construir_arbol(ArbolPlano *a, const Sistema *s,
                      const int *orden, const uint64_t *codigos,
                      const double minimo[3], double lado);
 
-/* Profundidad maxima alcanzada (para el informe y las pruebas). */
+
+/* --- Para la version OpenMP (c/openmp/arbol_omp.c) --- */
+
+/* Garantiza capacidad para al menos cap_minima nodos. */
+void arbol_reservar(ArbolPlano *a, int cap_minima);
+
+/* Construye en 'a' (desde el nodo 0) el subarbol de las particulas
+ * orden[ini..fin-1], que caen en el cubo (centro, lado) a la profundidad
+ * prof. Deja masa[] y com[] calculados. Cada hilo usa su propio 'a'. */
+void construir_subarbol(ArbolPlano *a, const Sistema *s,
+                        const int *orden, const uint64_t *codigos,
+                        int ini, int fin, const double centro[3],
+                        double lado, int prof);
+                                             /* Profundidad maxima alcanzada (para el informe y las pruebas). */
 int profundidad_arbol(const ArbolPlano *a);
 
 #endif

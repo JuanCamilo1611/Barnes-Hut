@@ -154,6 +154,24 @@ void construir_arbol(ArbolPlano *a, const Sistema *s,
     calcular_masa_com(a);
 }
 
+/* --- Usadas por la version OpenMP (c/openmp/arbol_omp.c) --- */
+
+void arbol_reservar(ArbolPlano *a, int cap_minima)
+{
+    if (a->cap < cap_minima)
+        ampliar(a, cap_minima);
+}
+
+void construir_subarbol(ArbolPlano *a, const Sistema *s,
+                        const int *orden, const uint64_t *codigos,
+                        int ini, int fin, const double centro[3],
+                        double lado, int prof)
+{
+    a->n_nodos = 0;
+    construir_rango(a, s, orden, codigos, ini, fin, centro, lado, prof);
+    calcular_masa_com(a);
+}
+
 int profundidad_arbol(const ArbolPlano *a)
 {
     /* La arista se divide a la mitad en cada nivel. */

@@ -24,3 +24,4 @@ c/common/prueba_morton
 c/common/prueba_arbol
 c/common/sim_barnes_hut
 c/mpi/sim_mpi
+c/openmp/prueba_arbol_omp

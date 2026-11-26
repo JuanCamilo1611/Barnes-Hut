@@ -1,7 +1,7 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include "morton.h"
-
 #define MARGEN 1e-6   /* fraccion de la arista que se agrega al cubo */
 
 void caja_envolvente(const Sistema *s, double minimo[3], double *lado)
@@ -72,22 +72,35 @@ void calcular_morton(const Sistema *s, const double minimo[3], double lado,
     }
 }
 
-/* qsort necesita los codigos dentro de la funcion de comparacion. */
-static const uint64_t *codigos_a_ordenar;
+/* Par (codigo, indice): se ordenan los pares juntos, asi la funcion de
+ * comparacion no necesita ninguna variable global y es segura con hilos. */
+typedef struct {
+    uint64_t codigo;
+    int indice;
+} ParMorton;
 
-static int comparar(const void *a, const void *b)
+static int comparar_pares(const void *a, const void *b)
 {
-    int i = *(const int *)a, j = *(const int *)b;
-    uint64_t ci = codigos_a_ordenar[i], cj = codigos_a_ordenar[j];
-    if (ci < cj) return -1;
-    if (ci > cj) return 1;
-    return (i > j) - (i < j);   /* empate: por indice */
+    const ParMorton *p = (const ParMorton *)a;
+    const ParMorton *q = (const ParMorton *)b;
+    if (p->codigo < q->codigo) return -1;
+    if (p->codigo > q->codigo) return 1;
+    return (p->indice > q->indice) - (p->indice < q->indice);  /* empate: por indice */
 }
 
 void ordenar_por_morton(int n, const uint64_t *codigos, int *orden)
 {
+    ParMorton *pares = malloc((size_t)n * sizeof(ParMorton));
+    if (pares == NULL) {
+        fprintf(stderr, "ordenar_por_morton: sin memoria\n");
+        exit(1);
+    }
+    for (int i = 0; i < n; i++) {
+        pares[i].codigo = codigos[i];
+        pares[i].indice = i;
+    }
+    qsort(pares, (size_t)n, sizeof(ParMorton), comparar_pares);
     for (int i = 0; i < n; i++)
-        orden[i] = i;
-    codigos_a_ordenar = codigos;
-    qsort(orden, (size_t)n, sizeof(int), comparar);
+        orden[i] = pares[i].indice;
+    free(pares);
 }
