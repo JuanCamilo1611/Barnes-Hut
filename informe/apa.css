@@ -1,0 +1,26 @@
+/* Estilo de impresion cercano a APA 7 (interlineado sencillo):
+   Times New Roman 12 pt, margenes de 2.54 cm, titulos en negrita. */
+@page { size: Letter; margin: 2.54cm; }
+html { font-family: "Times New Roman", Times, serif; font-size: 12pt;
+       line-height: 1.15; color: #000; background: #fff; }
+body { max-width: none; margin: 0; padding: 0; }
+header#title-block-header { text-align: center; margin-bottom: 1.2em; }
+h1.title { font-size: 14pt; font-weight: bold; margin: 0 0 .4em; }
+header#title-block-header p { text-align: center; }
+p.author { margin: 0; }
+p.date { margin: .2em 0 0; }
+h2 { font-size: 12pt; font-weight: bold; margin: 1.1em 0 .4em; }
+p { margin: 0 0 .55em; text-align: justify; }
+ul, ol { margin: 0 0 .55em; padding-left: 1.6em; }
+li { margin: 0 0 .15em; }
+table { border-collapse: collapse; margin: .3em auto .8em; font-size: 10.5pt;
+        page-break-inside: avoid; }
+th, td { padding: 2px 7px; }
+thead th { border-top: 1.2px solid #000; border-bottom: 1px solid #000; }
+tbody tr:last-child td { border-bottom: 1.2px solid #000; }
+figure { margin: .5em auto .8em; text-align: center; page-break-inside: avoid; }
+figure img { max-width: 100%; }
+figcaption { font-size: 10.5pt; font-style: italic; margin-top: .2em; }
+code { font-family: Consolas, "Courier New", monospace; font-size: 10.5pt; }
+/* Referencias con sangria francesa */
+h2#referencias ~ p { padding-left: 1.27cm; text-indent: -1.27cm; text-align: left; }
