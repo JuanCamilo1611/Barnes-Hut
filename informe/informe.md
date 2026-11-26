@@ -51,7 +51,7 @@ que 1 % (N = 2000, θ = 0.3, 5 pasos, 4 procesos o hilos).
 |---|---|---|---|---|
 | Python-mp, C, OpenMP | 0.119 / 1.73 % | 0.110 / 0.84 % | 0.331 / 0.91 % | 0.017 % |
 | MPI | 0.119 / 1.73 % | 0.111 / 0.81 % | 0.331 / 0.90 % | 0.017 % |
-| CUDA | 0.119 / 1.73 % | [MANUEL] | [MANUEL] | [MANUEL] |
+| CUDA | 0.119 / 1.73 % | 0.110 / 0.84 % | 0.331 / 0.91 % | 0.017 % |
 
 ¹ Con dt = 0.00025.
 
@@ -140,7 +140,33 @@ Sugerido:
 El porqué del aplanamiento va en la sección 7: aquí solo apuntar a ella.
 -->
 
-[MANUEL: sección OpenMP]
+Todos los hilos comparten el mismo árbol y las mismas partículas. Se
+paralelizan la caja envolvente (reducción `min`/`max`), los códigos
+Morton y la integración. Solo el ordenamiento (`qsort`) es secuencial;
+para que fuera seguro con hilos, `ordenar_por_morton` dejó de usar una
+variable global.
+
+**Construcción del árbol sin candados.** Un hilo arma el esqueleto (los
+niveles superiores) y se detiene cuando un nodo tiene menos de
+N/(8·hilos) partículas. Cada uno de esos rangos Morton es una tarea: un
+subárbol independiente que un hilo construye en un árbol local, con
+`schedule(dynamic, 1)`. Como los rangos no se tocan, ningún hilo escribe
+donde escribe otro. Luego, una suma prefija en preorden da la posición
+de cada subárbol en el árbol final, se copian en paralelo sumando ese
+desplazamiento a `hijos[]`, y los nodos del esqueleto se llenan de atrás
+hacia adelante. El resultado es **idéntico byte a byte** al árbol
+secuencial (`prueba_arbol_omp`, en las tres distribuciones).
+
+**Recorrido balanceado.** Cada hilo escribe solo la aceleración de sus
+partículas, así que no hay condición de carrera. Las partículas se
+recorren en orden Morton y se reparten con `schedule(dynamic, 64)`: una
+partícula en una zona densa abre muchos más nodos que una aislada, y con
+un reparto estático el hilo que recibe un cúmulo termina de último. El
+reparto se cambia sin recompilar con `OMP_SCHEDULE`.
+
+Con N = 200 000 y 8 hilos, el recorrido ocupa ≈ 95 % del tiempo y el
+árbol menos de 0.06 s, así que el escalado lo decide el recorrido,
+limitado por la memoria (sección 7).
 
 ## 6. CUDA
 
@@ -155,7 +181,40 @@ Sugerido:
 - barrido de hilos por bloque (tools/comparar_cuda.py --hilos 32 64 128 256).
 -->
 
-[MANUEL: sección CUDA]
+El árbol plano del contrato (seis arreglos: centro, lado, masa, centro
+de masa, hijos y partícula) se copia a la GPU como estructura de
+arreglos, para que los accesos de un warp sean contiguos. Cada
+evaluación de fuerzas tiene tres fases, medidas con `cudaEvent`:
+
+1. **Morton y ordenamiento en la GPU.** Un hilo por partícula calcula
+   su código y `thrust::sort_by_key` las ordena (radix sort estable,
+   con el mismo desempate que el núcleo C).
+2. **Construcción del árbol en la CPU.** Se copian el orden y los
+   códigos a la CPU, se construye el árbol con el núcleo C y se copian
+   los seis arreglos a la GPU. El tiempo incluye esas copias.
+3. **Recorrido sin recursión.** Cada hilo calcula una partícula con una
+   pila explícita en registros, en orden Morton. Así, los 32 hilos de un
+   warp son partículas vecinas que abren casi los mismos nodos, lo que
+   reduce la divergencia.
+
+La integración *leapfrog* también corre en la GPU y tarda menos de
+1 ms. `compute-sanitizer` (memcheck y racecheck) no reportó errores, y
+la versión pasa la verificación con los mismos errores que C (Tabla 1).
+
+![Desglose por fase en la T4, N = 200 000, 128 hilos por bloque (mediana de 3).](../resultados/plots/fases_cuda.png){width=60%}
+
+Con N = 200 000, una evaluación tarda entre 0.18 y 0.27 s, entre 6 y 8
+veces menos que la mejor versión en CPU. El recorrido es lo que más
+cuesta y crece en las distribuciones densas (116 ms en la uniforme
+frente a 205 ms en las concentradas), porque una partícula en un cúmulo
+abre más nodos y los warps hacen más trabajo. La construcción en la CPU
+ocupa entre el 20 y el 32 % del tiempo: es la **fracción secuencial**
+de esta versión y la que limitaría el *speedup* si el recorrido fuera
+aún más rápido. El ordenamiento en la GPU es despreciable (≈ 5 ms).
+
+El tamaño de bloque cambia poco el resultado: con 32, 64, 128 y 256
+hilos por bloque los tiempos difieren como mucho 11 %, y 32 fue
+ligeramente más rápido en el recorrido (`tools/comparar_cuda.py`).
 
 ## 7. Comparación y análisis del escalado
 
@@ -170,7 +229,7 @@ Sugerido:
 | OpenMP (1) | 2.74 | 6.17 | 6.63 |
 | OpenMP, mejor | 1.25 (8) | **1.99** (8) | 2.40 (8) |
 | MPI, mejor | **1.10** (8) | 2.46 (4) | **2.28** (4) |
-| CUDA (T4) | **0.20** | [MANUEL] | **0.31** |
+| CUDA (T4, 128 hilos/bloque) | **0.18** | **0.24** | **0.27** |
 
 ![Tiempo por evaluación de fuerzas, N = 200 000 (`tools/comparar.py`).](../resultados/plots/comparar_N200000.png)
 
@@ -203,7 +262,7 @@ y al 50 % con N = 20 000.
 
 **Python** es entre 8.5 y 15 veces más lento que OpenMP o MPI con 8
 procesos y N = 200 000, y hasta 25 veces con N = 20 000. **CUDA** es
-≈ 5.5× más rápida que la mejor CPU, y su fracción secuencial es el
+entre 6 y 8 veces más rápida que la mejor CPU, y su fracción secuencial es el
 *build* en la CPU.
 
 ## 8. Conclusiones
@@ -219,8 +278,6 @@ procesos y N = 200 000, y hasta 25 veces con N = 20 000. **CUDA** es
   única que reparte la memoria, pero sufre cuando los cortes caen en
   zonas densas. **CUDA** gana por un orden de magnitud con N grande.
 - Conviene usar tantos procesos como núcleos físicos.
-
-[MANUEL: una frase sobre OpenMP/CUDA si hace falta]
 
 Código, historial, scripts y CSV: repositorio `JuanCamilo1611/Barnes-Hut`.
 
