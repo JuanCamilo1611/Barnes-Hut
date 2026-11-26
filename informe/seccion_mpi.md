@@ -157,10 +157,28 @@ el número de interacciones no cambia. Hay tres señales:
   P = 2: el LET recibido crece (75 000 → 112 000 nodos) a medida que el
   árbol local se achica.
 
-Nuestra hipótesis es que los cortes de la curva Morton parten los
-cúmulos densos, y cada mitad necesita la otra con todo detalle porque
-está a menos de θ de distancia. Ese recorrido sobre árboles remotos tiene
-peor localidad que sobre el propio.
+La causa es dónde caen los cortes. Con P = 2 el corte separa los dos
+cúmulos, que están lejos entre sí, y el LET es pequeño (7 800 nodos). Con
+P = 4 y P = 8 los cortes caen *dentro* de cada cúmulo gaussiano, y
+Morton lo divide en piezas de forma muy desigual. Por ejemplo, con P = 8
+una pieza es un bloque compacto del núcleo denso (52 % de sus partículas
+a menos de σ del centro) y otras son capas dispersas que lo envuelven
+(3–10 %). Cada capa tiene el núcleo ajeno pegado y lo necesita con todo
+detalle.
+
+Para comprobarlo se contó, para cada proceso, cuántas partículas de
+otros procesos hay en las celdas vecinas a las suyas (grilla de 32³).
+Ese conteo sigue al LET medido:
+
+| distribución | partículas ajenas vecinas (P = 2 → 4 → 8) | LET recibido (P = 2 → 4 → 8) |
+|---|---|---|
+| uniforme | 6 500 → 7 100 → 5 600 | 18 700 → 22 300 → 18 900 |
+| cúmulos | 100 → 25 000 → 42 000 | 7 800 → 75 000 → 112 000 |
+
+En la uniforme la densidad es la misma en toda la frontera y el LET no
+crece. En cúmulos, cada corte nuevo pasa por una zona más densa. Además,
+recorrer P − 1 árboles remotos tiene peor localidad de caché que
+recorrer el propio.
 
 **Con más procesos que hilos (P = 16)** el rendimiento empeora en todos
 los casos, porque el sistema operativo turna 16 procesos en 8 hilos. Las
