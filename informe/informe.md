@@ -1,7 +1,7 @@
 ---
 title: "Simulación de N cuerpos con Barnes-Hut en cuatro modelos de paralelismo"
 author:
-  - "Juan Camilo [APELLIDO] y Manuel Carmona"
+  - "Juan Camilo Botero Melchor y Manuel Carmona"
   - "Programación Concurrente y Distribuida, 2026-02, Universidad de Caldas"
 date: "1 de diciembre de 2026"
 lang: es
@@ -134,8 +134,10 @@ conteo se mantiene estable.
 Sugerido:
 - construcción paralela del árbol desde Morton, idéntica byte a byte al
   secuencial (prueba_arbol_omp), sin candados;
-- recorrido con schedule(dynamic,64) frente a static (35 %), por los P-cores
-  y E-cores del i5-12500H;
+- recorrido con schedule(dynamic,64) frente a static. Medido en el
+  i5-8250U (walk, N = 200 000, mínimo de 5 corridas alternadas): dynamic
+  gana 3 / 12 % en uniforme (4 / 8 hilos), 11 / 23 % en cúmulos y
+  17 / 20 % en concentradas. (El 35 % era del i5-12500H: no usar.)
 - ordenar_por_morton sin variable global.
 El porqué del aplanamiento va en la sección 7: aquí solo apuntar a ella.
 -->
@@ -276,7 +278,7 @@ entre 6 y 8 veces más rápida que la mejor CPU, y su fracción secuencial es el
   secuencial. Por eso la localidad dio más que pasar de 4 a 8 hilos.
 - **OpenMP** es la opción más robusta en una sola máquina. **MPI** es la
   única que reparte la memoria, pero sufre cuando los cortes caen en
-  zonas densas. **CUDA** gana por un orden de magnitud con N grande.
+  zonas densas. **CUDA** es entre 6 y 8 veces más rápida con N grande.
 - Conviene usar tantos procesos como núcleos físicos.
 
 Código, historial, scripts y CSV: repositorio `JuanCamilo1611/Barnes-Hut`.
